@@ -81,113 +81,67 @@ def extract_text_from_pdf(pdf_file, use_ocr=False):
         if page_count > 5 or use_ocr:
             progress_bar = st.progress(0)
 
-        # chunk_size = 20  # Adjust as needed
-        chunk_size = st.sidebar.slider(
-            "OCR Chunk Size (pages per batch)", 2, 5, 50, 20,
-            help="OCR will be processed in chunks of this size. Smaller chunks use less memory but may be slower overall."
-        )
-
-        for chunk_start in range(0, page_count, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, page_count)
-            st.info(f"Processing pages {chunk_start + 1} to {chunk_end}")
-
-            for page_num in range(chunk_start, chunk_end):
+        for page_num in range(page_count):
+            try:
+                # Use modern PyMuPDF API - access page by index
                 try:
-                    page = pdf_document.load_page(page_num)
-                    page_text = page.get_text()
+                    page = pdf_document[page_num]  # New API
+                except:
+                    try:
+                        page = pdf_document.load_page(
+                            page_num)  # Alternative API
+                    except:
+                        page = pdf_document.loadPage(page_num)  # Older API
 
-                    if (not page_text.strip() or len(page_text.strip()) < 10) and use_ocr:
-                        # Run OCR
+                # First try regular text extraction
+                page_text = page.get_text()
+
+                # If no text found and OCR is enabled, try OCR
+                if (not page_text.strip() or len(page_text.strip()) < 10) and use_ocr:
+                    try:
+                        # Convert page to image
+                        # Increase resolution for better OCR
                         mat = fitz.Matrix(2.0, 2.0)
                         pix = page.get_pixmap(matrix=mat)
                         img_data = pix.tobytes("png")
+
+                        # Convert to PIL Image
                         img = Image.open(io.BytesIO(img_data))
+
+                        # Use Tesseract OCR
                         ocr_text = pytesseract.image_to_string(
-                            img, lang='eng+hin+san')
+                            img, lang='eng+hin+san')  # English, Hindi, Sanskrit
 
                         if ocr_text.strip():
                             page_text = f"[OCR EXTRACTED]\n{ocr_text}"
-                            st.success(f"OCR on page {page_num + 1}")
+                            st.success(
+                                f"OCR extracted text from page {page_num + 1}")
                         else:
-                            page_text = "[OCR ATTEMPTED - NO TEXT FOUND]"
+                            page_text = f"[OCR ATTEMPTED - NO TEXT FOUND]"
 
-                    if page_text.strip() and len(page_text.strip()) > 10:
-                        text_content += page_text + \
-                            f"\n\n--- End of Page {page_num + 1} ---\n\n"
-                        pages_with_text += 1
-                    else:
-                        text_content += f"\n--- Page {page_num + 1} (No text found) ---\n"
-                        pages_without_text += 1
+                    except Exception as ocr_error:
+                        page_text = f"[OCR ERROR: {str(ocr_error)}]"
+                        st.warning(
+                            f"OCR failed on page {page_num + 1}: {str(ocr_error)}")
 
-                    if progress_bar:
-                        progress_bar.progress((page_num + 1) / page_count)
-
-                except Exception as page_error:
-                    st.warning(
-                        f"Error on page {page_num + 1}: {str(page_error)}")
+                # Check if we got any meaningful text from this page
+                if page_text.strip() and len(page_text.strip()) > 10:
+                    text_content += page_text
+                    text_content += f"\n\n--- End of Page {page_num + 1} ---\n\n"
+                    pages_with_text += 1
+                else:
+                    text_content += f"\n--- Page {page_num + 1} (No text found) ---\n"
                     pages_without_text += 1
 
-        # for page_num in range(page_count):
-        #     try:
-        #         # Use modern PyMuPDF API - access page by index
-        #         try:
-        #             page = pdf_document[page_num]  # New API
-        #         except:
-        #             try:
-        #                 page = pdf_document.load_page(
-        #                     page_num)  # Alternative API
-        #             except:
-        #                 page = pdf_document.loadPage(page_num)  # Older API
+                # Update progress bar
+                if progress_bar:
+                    progress_bar.progress((page_num + 1) / page_count)
 
-        #         # First try regular text extraction
-        #         page_text = page.get_text()
-
-        #         # If no text found and OCR is enabled, try OCR
-        #         if (not page_text.strip() or len(page_text.strip()) < 10) and use_ocr:
-        #             try:
-        #                 # Convert page to image
-        #                 # Increase resolution for better OCR
-        #                 mat = fitz.Matrix(2.0, 2.0)
-        #                 pix = page.get_pixmap(matrix=mat)
-        #                 img_data = pix.tobytes("png")
-
-        #                 # Convert to PIL Image
-        #                 img = Image.open(io.BytesIO(img_data))
-
-        #                 # Use Tesseract OCR
-        #                 ocr_text = pytesseract.image_to_string(
-        #                     img, lang='eng+hin+san')  # English, Hindi, Sanskrit
-
-        #                 if ocr_text.strip():
-        #                     page_text = f"[OCR EXTRACTED]\n{ocr_text}"
-        #                     st.success(
-        #                         f"OCR extracted text from page {page_num + 1}")
-        #                 else:
-        #                     page_text = f"[OCR ATTEMPTED - NO TEXT FOUND]"
-
-        #             except Exception as ocr_error:
-        #                 page_text = f"[OCR ERROR: {str(ocr_error)}]"
-        #                 st.warning(
-        #                     f"OCR failed on page {page_num + 1}: {str(ocr_error)}")
-
-        #         # Check if we got any meaningful text from this page
-        #         if page_text.strip() and len(page_text.strip()) > 10:
-        #             text_content += page_text
-        #             text_content += f"\n\n--- End of Page {page_num + 1} ---\n\n"
-        #             pages_with_text += 1
-        #         else:
-        #             text_content += f"\n--- Page {page_num + 1} (No text found) ---\n"
-        #             pages_without_text += 1
-
-        #         # Update progress bar
-        #         if progress_bar:
-        #             progress_bar.progress((page_num + 1) / page_count)
-
-        #     except Exception as page_error:
-        #         st.warning(
-        #             f"Error processing page {page_num + 1}: {str(page_error)}")
-        #         text_content += f"\n--- Page {page_num + 1} (Error: {str(page_error)}) ---\n"
-        #         pages_without_text += 1
+            except Exception as page_error:
+                st.warning(
+                    f"Error processing page {page_num + 1}: {str(page_error)}")
+                text_content += f"\n--- Page {page_num + 1} (Error: {str(page_error)}) ---\n"
+                pages_without_text += 1
 
         # Clear progress bar
         if progress_bar:
