@@ -1,1 +1,15 @@
-streamlit
+# Core Streamlit framework
+streamlit>=1.28.0
+
+# PDF text extraction
+PyMuPDF>=1.23.0
+
+# Character encoding detection
+chardet>=5.0.0
+
+# Word document creation
+python-docx>=0.8.11
+
+# Additional dependencies that might be needed
+Pillow>=9.0.0
+lxml>=4.9.0
