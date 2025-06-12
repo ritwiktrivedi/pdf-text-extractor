@@ -7,6 +7,9 @@ from docx import Document
 from docx.shared import Inches
 import tempfile
 import os
+from PIL import Image
+import pytesseract
+import numpy as np
 
 # Set page configuration
 st.set_page_config(
@@ -16,48 +19,165 @@ st.set_page_config(
 )
 
 
-def extract_text_from_pdf(pdf_file):
-    """Extract text from PDF file using PyMuPDF"""
+def extract_text_from_pdf(pdf_file, use_ocr=False):
+    """Extract text from PDF file using PyMuPDF with optional OCR"""
     try:
-        # Check file size (optional warning for large files)
+        # Check file size first
         file_size_mb = pdf_file.size / (1024 * 1024)
+
+        # Check if file is too small to be a valid PDF
+        if pdf_file.size < 100:
+            st.error(
+                f"File is too small ({pdf_file.size} bytes) to be a valid PDF. Please check your upload.")
+            return None
+
         if file_size_mb > 50:
             st.warning(
                 f"Large file detected ({file_size_mb:.1f}MB). Processing may take a while.")
 
         # Read PDF from uploaded file
         pdf_bytes = pdf_file.read()
-        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-        # Check page count
-        page_count = pdf_document.page_count
+        # Check if it's a valid PDF by looking at the header
+        if not pdf_bytes.startswith(b'%PDF'):
+            st.error(
+                "This doesn't appear to be a valid PDF file. Please check the file format.")
+            return None
+
+        # Try to open the PDF
+        try:
+            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        except Exception as pdf_error:
+            st.error(f"Cannot open PDF file: {str(pdf_error)}")
+            st.info("This might be a corrupted PDF or a PDF with restrictions.")
+            return None
+
+        # Check page count - use len() for newer PyMuPDF versions
+        try:
+            page_count = len(pdf_document)
+        except:
+            try:
+                page_count = pdf_document.page_count
+            except:
+                page_count = pdf_document.pageCount  # Even older versions
+
+        if page_count == 0:
+            st.error("PDF has no pages or pages cannot be accessed.")
+            pdf_document.close()
+            return None
+
+        st.info(f"PDF loaded successfully: {page_count} pages found")
+
         if page_count > 500:
             st.warning(
                 f"Large document ({page_count} pages). Processing may take time.")
 
         text_content = ""
+        pages_with_text = 0
+        pages_without_text = 0
+
         # Add progress bar for large documents
-        if page_count > 10:
+        progress_bar = None
+        if page_count > 5 or use_ocr:
             progress_bar = st.progress(0)
 
         for page_num in range(page_count):
-            page = pdf_document.page(page_num)
-            text_content += page.get_text()
-            text_content += f"\n--- Page {page_num + 1} ---\n"
+            try:
+                # Use modern PyMuPDF API - access page by index
+                try:
+                    page = pdf_document[page_num]  # New API
+                except:
+                    try:
+                        page = pdf_document.load_page(
+                            page_num)  # Alternative API
+                    except:
+                        page = pdf_document.loadPage(page_num)  # Older API
 
-            # Update progress bar
-            if page_count > 10:
-                progress_bar.progress((page_num + 1) / page_count)
+                # First try regular text extraction
+                page_text = page.get_text()
+
+                # If no text found and OCR is enabled, try OCR
+                if (not page_text.strip() or len(page_text.strip()) < 10) and use_ocr:
+                    try:
+                        # Convert page to image
+                        # Increase resolution for better OCR
+                        mat = fitz.Matrix(2.0, 2.0)
+                        pix = page.get_pixmap(matrix=mat)
+                        img_data = pix.tobytes("png")
+
+                        # Convert to PIL Image
+                        img = Image.open(io.BytesIO(img_data))
+
+                        # Use Tesseract OCR
+                        ocr_text = pytesseract.image_to_string(
+                            img, lang='eng+hin+san')  # English, Hindi, Sanskrit
+
+                        if ocr_text.strip():
+                            page_text = f"[OCR EXTRACTED]\n{ocr_text}"
+                            st.success(
+                                f"OCR extracted text from page {page_num + 1}")
+                        else:
+                            page_text = f"[OCR ATTEMPTED - NO TEXT FOUND]"
+
+                    except Exception as ocr_error:
+                        page_text = f"[OCR ERROR: {str(ocr_error)}]"
+                        st.warning(
+                            f"OCR failed on page {page_num + 1}: {str(ocr_error)}")
+
+                # Check if we got any meaningful text from this page
+                if page_text.strip() and len(page_text.strip()) > 10:
+                    text_content += page_text
+                    text_content += f"\n\n--- End of Page {page_num + 1} ---\n\n"
+                    pages_with_text += 1
+                else:
+                    text_content += f"\n--- Page {page_num + 1} (No text found) ---\n"
+                    pages_without_text += 1
+
+                # Update progress bar
+                if progress_bar:
+                    progress_bar.progress((page_num + 1) / page_count)
+
+            except Exception as page_error:
+                st.warning(
+                    f"Error processing page {page_num + 1}: {str(page_error)}")
+                text_content += f"\n--- Page {page_num + 1} (Error: {str(page_error)}) ---\n"
+                pages_without_text += 1
 
         # Clear progress bar
-        if page_count > 10:
+        if progress_bar:
             progress_bar.empty()
 
         pdf_document.close()
+
+        # Show extraction summary
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Pages with Text", pages_with_text)
+        with col2:
+            st.metric("Pages without Text", pages_without_text)
+        with col3:
+            st.metric("OCR Used", "Yes" if use_ocr else "No")
+
+        # Check if we extracted any meaningful text
+        if not text_content.strip() or len(text_content.strip()) < 50:
+            if not use_ocr:
+                st.warning(
+                    "⚠️ No text was extracted from the PDF using regular extraction.")
+                st.info("This appears to be a scanned PDF or image-based PDF.")
+                st.info("🔄 Try enabling OCR (Optical Character Recognition) below.")
+                return None
+            else:
+                st.error("No text could be extracted even with OCR.")
+                return None
+
         return text_content
 
     except Exception as e:
         st.error(f"Error extracting text from PDF: {str(e)}")
+        st.info("Try checking if:")
+        st.info("• The PDF file is not corrupted")
+        st.info("• The PDF is not password-protected")
+        st.info("• The file is actually a PDF (not renamed image)")
         return None
 
 
@@ -178,9 +298,22 @@ def main():
         st.success(
             f"File uploaded: {uploaded_file.name} ({uploaded_file.size} bytes)")
 
+        # OCR option
+        use_ocr = st.checkbox(
+            "🔍 Enable OCR (for scanned/image-based PDFs)",
+            help="Use Optical Character Recognition to extract text from images. This will take longer but can read scanned documents."
+        )
+
+        if use_ocr:
+            st.info("📋 OCR Language Support: English, Hindi, Sanskrit")
+            st.warning(
+                "⏱️ OCR processing may take significantly longer, especially for large documents.")
+
         # Extract text
-        with st.spinner("Extracting text from PDF..."):
-            extracted_text = extract_text_from_pdf(uploaded_file)
+        extraction_method = "OCR extraction" if use_ocr else "Regular text extraction"
+        with st.spinner(f"{extraction_method} in progress..."):
+            extracted_text = extract_text_from_pdf(
+                uploaded_file, use_ocr=use_ocr)
 
         if extracted_text:
             # Display basic stats
@@ -325,10 +458,16 @@ def main():
         st.header("ℹ️ How to Use")
         st.markdown("""
         1. **Upload PDF**: Click 'Browse files' to upload your PDF
-        2. **View Stats**: See character, word, and line counts
-        3. **Select Encoding**: Choose the best encoding for your text
-        4. **Preview Text**: Review the extracted text
-        5. **Download**: Get TXT or Word document with proper encoding
+        2. **Enable OCR**: Check the box if your PDF contains scanned images
+        3. **View Stats**: See character, word, and line counts
+        4. **Select Encoding**: Choose the best encoding for your text
+        5. **Preview Text**: Review the extracted text
+        6. **Download**: Get TXT or Word document with proper encoding
+        
+        **OCR Notes:**
+        - Use OCR for scanned documents or image-based PDFs
+        - OCR supports English, Hindi, and Sanskrit
+        - OCR processing takes longer but extracts text from images
         
         **Encoding Tips:**
         - UTF-8: Works for most modern documents
@@ -339,11 +478,14 @@ def main():
 
         st.header("🔧 Supported Features")
         st.markdown("""
-        - PDF text extraction
+        - PDF text extraction (regular + OCR)
+        - Scanned document support via Tesseract OCR
+        - Multiple language support (English, Hindi, Sanskrit)
         - Multiple encoding detection
         - Text and Word document export
         - Encoding comparison
         - Character encoding validation
+        - Progress tracking for large files
         """)
 
 
