@@ -9,6 +9,9 @@ pytesseract>=0.3.10
 Pillow>=9.0.0
 opencv-python-headless>=4.8.0
 
+# Google Generative AI API for Image Understanding
+google-generativeai>=0.3.0
+
 # Character encoding detection
 chardet>=5.0.0
 
