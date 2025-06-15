@@ -895,7 +895,19 @@ def create_enhanced_docx_with_metadata(text_content: str, extraction_metadata: D
 
 
 def main():
-    """Main Streamlit application with enhanced UI"""
+    """Main Streamlit application with enhanced UI and persistent state"""
+
+    # Initialize session state for persistence
+    if 'extraction_complete' not in st.session_state:
+        st.session_state.extraction_complete = False
+    if 'extracted_results' not in st.session_state:
+        st.session_state.extracted_results = {}
+    if 'merged_text' not in st.session_state:
+        st.session_state.merged_text = ""
+    if 'extraction_metadata' not in st.session_state:
+        st.session_state.extraction_metadata = {}
+    if 'processing_stats' not in st.session_state:
+        st.session_state.processing_stats = {}
 
     # Custom CSS for better appearance
     st.markdown("""
@@ -938,6 +950,13 @@ def main():
     # Sidebar configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
+
+        # Show current status
+        if st.session_state.get('extraction_complete', False):
+            st.success("✅ Extraction Complete")
+            if st.button("🗑️ Clear Results", help="Clear current results to process a new file"):
+                clear_extraction_state()
+                st.rerun()
 
         # API Key section
         st.subheader("🔑 AI Configuration")
@@ -1063,7 +1082,26 @@ def main():
         # Processing section
         st.header("🚀 Processing")
 
-        if st.button("Start Extraction", type="primary"):
+        # Create columns for better layout
+        col1, col2 = st.columns([3, 1])
+
+        with col1:
+            start_extraction = st.button("Start Extraction", type="primary",
+                                         disabled=st.session_state.extraction_complete)
+
+        with col2:
+            if st.session_state.extraction_complete:
+                if st.button("🔄 Process New File", type="secondary"):
+                    # Clear session state for new processing
+                    clear_extraction_state()
+                    st.rerun()
+
+        # Show processing status
+        if st.session_state.extraction_complete:
+            st.success("✅ Extraction completed! Downloads are ready below.")
+
+        # Process only if button clicked and not already complete
+        if start_extraction and not st.session_state.extraction_complete:
             start_time = time.time()
 
             # Initialize progress tracking
@@ -1111,92 +1149,139 @@ def main():
                                 st.write(
                                     f"Page {page_num + 1}: {text_length} chars, {confidence:.1f}% confidence ({method})")
 
-                # Complete processing
-                progress_bar.progress(1.0)
-                status_text.text("Processing complete!")
+                # Store results in session state instead of local variables
+                st.session_state.extracted_results = all_results
+                st.session_state.merged_text = merge_extraction_results(
+                    all_results)
 
-                # Generate final results
+                # Create and store extraction metadata
                 processing_time = time.time() - start_time
-                merged_text = merge_extraction_results(all_results)
-
-                # Create extraction metadata
-                extraction_metadata = {
+                st.session_state.extraction_metadata = {
                     'extraction_method': extraction_methods[extraction_method],
                     'languages_selected': ', '.join(selected_languages),
                     'total_pages_processed': pages_to_process,
                     'processing_time_seconds': f"{processing_time:.2f}",
-                    'total_characters_extracted': len(merged_text),
+                    'total_characters_extracted': len(st.session_state.merged_text),
                     'gemini_extraction_type': gemini_extraction_types.get(gemini_extraction_type, 'N/A') if extraction_method in ["hybrid", "gemini"] else 'N/A',
                     'preprocessing_enabled': enable_preprocessing,
                     'extraction_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                # Display results summary
-                st.header("📊 Extraction Results")
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Pages Processed", pages_to_process)
-                with col2:
-                    st.metric("Processing Time", f"{processing_time:.1f}s")
-                with col3:
-                    st.metric("Characters Extracted", f"{len(merged_text):,}")
-                with col4:
-                    avg_confidence = sum(r.get('confidence', 0) for r in all_results.values(
-                    )) / len(all_results) if all_results else 0
-                    st.metric("Avg Confidence", f"{avg_confidence:.1f}%")
-
-                # Results breakdown by method
+                # Store processing stats
+                avg_confidence = sum(r.get('confidence', 0) for r in all_results.values(
+                )) / len(all_results) if all_results else 0
                 method_counts = {}
                 for result in all_results.values():
                     method = result.get('method', 'unknown')
                     method_counts[method] = method_counts.get(method, 0) + 1
 
-                if len(method_counts) > 1:
-                    st.subheader("📈 Processing Method Breakdown")
-                    for method, count in method_counts.items():
-                        st.write(
-                            f"**{method.replace('_', ' ').title()}**: {count} pages")
+                st.session_state.processing_stats = {
+                    'pages_processed': pages_to_process,
+                    'processing_time': processing_time,
+                    'total_characters': len(st.session_state.merged_text),
+                    'avg_confidence': avg_confidence,
+                    'method_counts': method_counts
+                }
 
-                # Text preview
-                st.subheader("👁️ Text Preview")
-                preview_text = merged_text[:2000] + \
-                    ("..." if len(merged_text) > 2000 else "")
-                st.text_area("Extracted Text Preview",
-                             preview_text, height=300)
+                # Mark extraction as complete
+                st.session_state.extraction_complete = True
 
-                # Download options
-                st.header("💾 Download Options")
+                # Complete processing
+                progress_bar.progress(1.0)
+                status_text.text("Processing complete! Results saved.")
 
-                col1, col2 = st.columns(2)
+                # Force a rerun to show results
+                st.rerun()
 
-                with col1:
-                    # Plain text download
-                    st.download_button(
-                        label="📄 Download as TXT",
-                        data=merged_text.encode('utf-8'),
-                        file_name=f"extracted_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
+            except Exception as e:
+                st.error(f"❌ Processing failed: {str(e)}")
+                if enable_debug:
+                    st.exception(e)
+            finally:
+                # Cleanup
+                if 'pdf_document' in locals():
+                    pdf_document.close()
+                cleanup_memory()
 
-                with col2:
-                    # DOCX download
+        # Display results section (always show if extraction is complete)
+        if st.session_state.extraction_complete and st.session_state.merged_text:
+            st.header("📊 Extraction Results")
+
+            # Display stats from session state
+            stats = st.session_state.processing_stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Pages Processed", stats.get('pages_processed', 0))
+            with col2:
+                st.metric("Processing Time",
+                          f"{stats.get('processing_time', 0):.1f}s")
+            with col3:
+                st.metric("Characters Extracted",
+                          f"{stats.get('total_characters', 0):,}")
+            with col4:
+                st.metric("Avg Confidence",
+                          f"{stats.get('avg_confidence', 0):.1f}%")
+
+            # Results breakdown by method
+            method_counts = stats.get('method_counts', {})
+            if len(method_counts) > 1:
+                st.subheader("📈 Processing Method Breakdown")
+                for method, count in method_counts.items():
+                    st.write(
+                        f"**{method.replace('_', ' ').title()}**: {count} pages")
+
+            # Text preview
+            st.subheader("👁️ Text Preview")
+            preview_text = st.session_state.merged_text[:2000] + \
+                ("..." if len(st.session_state.merged_text) > 2000 else "")
+            st.text_area("Extracted Text Preview", preview_text, height=300)
+
+            # Persistent download section
+            st.header("💾 Download Options")
+
+            # Add helpful message
+            st.info(
+                "💡 **Download Tip**: You can download multiple formats! Each download won't reset the app.")
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                # Plain text download with unique key
+                st.download_button(
+                    label="📄 Download as TXT",
+                    data=st.session_state.merged_text.encode('utf-8'),
+                    file_name=f"extracted_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain",
+                    key="download_txt"  # Unique key prevents conflicts
+                )
+
+            with col2:
+                # DOCX download with unique key
+                try:
                     docx_buffer = create_enhanced_docx_with_metadata(
-                        merged_text, extraction_metadata)
+                        st.session_state.merged_text,
+                        st.session_state.extraction_metadata
+                    )
                     if docx_buffer:
                         st.download_button(
                             label="📝 Download as DOCX",
                             data=docx_buffer.getvalue(),
                             file_name=f"extracted_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key="download_docx"  # Unique key
                         )
+                    else:
+                        st.error("Error creating DOCX file")
+                except Exception as e:
+                    st.error(f"Error creating DOCX: {str(e)}")
 
-                # JSON download for advanced users
+            with col3:
+                # JSON download for debug (if enabled)
                 if enable_debug:
                     json_data = {
-                        'metadata': extraction_metadata,
-                        'results': {str(k): v for k, v in all_results.items()},
-                        'merged_text': merged_text
+                        'metadata': st.session_state.extraction_metadata,
+                        'results': {str(k): v for k, v in st.session_state.extracted_results.items()},
+                        'merged_text': st.session_state.merged_text
                     }
 
                     st.download_button(
@@ -1204,19 +1289,13 @@ def main():
                         data=json.dumps(json_data, indent=2,
                                         ensure_ascii=False).encode('utf-8'),
                         file_name=f"extraction_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                        mime="application/json"
+                        mime="application/json",
+                        key="download_json"  # Unique key
                     )
 
-            except Exception as e:
-                st.error(f"❌ Processing failed: {str(e)}")
-                if enable_debug:
-                    st.exception(e)
-
-            finally:
-                # Cleanup
-                if 'pdf_document' in locals():
-                    pdf_document.close()
-                cleanup_memory()
+            # Additional download status
+            st.success(
+                "🎉 **All downloads are ready!** Click any download button above. The app won't reset between downloads.")
 
     # Footer
     st.markdown("---")
@@ -1226,6 +1305,17 @@ def main():
         <p>💡 For best results with Indic languages, use Hybrid or Gemini AI methods</p>
     </div>
     """, unsafe_allow_html=True)
+
+
+def clear_extraction_state():
+    """Helper function to clear extraction state"""
+    keys_to_clear = [
+        'extraction_complete', 'extracted_results', 'merged_text',
+        'extraction_metadata', 'processing_stats'
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
 
 
 if __name__ == "__main__":
