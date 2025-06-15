@@ -9,7 +9,7 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import tempfile
 import os
-from PIL import Image, ImageFont, ImageDraw
+from PIL import Image, ImageFont, ImageDraw, ImageEnhance
 import pytesseract
 import numpy as np
 import cv2
@@ -52,7 +52,7 @@ INDIC_LANGUAGES = {
     'english': 'eng'
 }
 
-# Indic font families that work well with OCR
+# Enhanced Indic font families that work well with OCR
 INDIC_FONTS = {
     'devanagari': ['Mangal', 'Nirmala UI', 'Sanskrit 2003', 'Kokila', 'Aparajita'],
     'bengali': ['Nirmala UI', 'Shonar Bangla', 'Vrinda'],
@@ -71,16 +71,18 @@ processed_pages_cache = {}
 memory_threshold = 80  # Percentage
 
 
-class RateLimiter:
-    """Enhanced rate limiter for Gemini API with adaptive delays"""
+class EnhancedRateLimiter:
+    """Enhanced rate limiter for Gemini API with accuracy-focused adaptive delays"""
 
-    def __init__(self, calls_per_minute=30, burst_limit=5):
-        self.calls_per_minute = calls_per_minute
-        self.burst_limit = burst_limit
+    def __init__(self, calls_per_minute=20, burst_limit=3, accuracy_mode=False):
+        # Slower for accuracy
+        self.calls_per_minute = calls_per_minute if not accuracy_mode else 15
+        self.burst_limit = burst_limit if not accuracy_mode else 2
         self.call_times = []
         self.lock = Lock()
         self.consecutive_calls = 0
         self.last_call_time = 0
+        self.accuracy_mode = accuracy_mode
 
     def wait_if_needed(self):
         with self.lock:
@@ -89,9 +91,11 @@ class RateLimiter:
             # Remove calls older than 1 minute
             self.call_times = [t for t in self.call_times if now - t < 60]
 
-            # Adaptive delay based on consecutive calls
+            # Enhanced adaptive delay for accuracy
+            base_delay = 2.0 if self.accuracy_mode else 1.0
             if self.consecutive_calls > 0:
-                adaptive_delay = min(2.0, 0.2 * (self.consecutive_calls / 10))
+                adaptive_delay = min(
+                    5.0, base_delay * (1 + self.consecutive_calls / 20))
                 if now - self.last_call_time < adaptive_delay:
                     time.sleep(adaptive_delay - (now - self.last_call_time))
 
@@ -101,11 +105,12 @@ class RateLimiter:
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
-            # Check burst limit
-            # Last 10 seconds
-            recent_calls = [t for t in self.call_times if now - t < 10]
+            # Check burst limit with stricter enforcement for accuracy
+            recent_window = 15 if self.accuracy_mode else 10
+            recent_calls = [
+                t for t in self.call_times if now - t < recent_window]
             if len(recent_calls) >= self.burst_limit:
-                time.sleep(2)
+                time.sleep(3 if self.accuracy_mode else 2)
 
             self.call_times.append(now)
             self.consecutive_calls += 1
@@ -116,7 +121,7 @@ class RateLimiter:
 
 
 # Global rate limiter
-rate_limiter = RateLimiter(calls_per_minute=25, burst_limit=3)
+rate_limiter = EnhancedRateLimiter(accuracy_mode=True)
 
 
 def get_memory_usage():
@@ -140,15 +145,19 @@ def setup_gemini(api_key: str) -> bool:
         genai.configure(api_key=api_key)
         # Test the API key with a simple request
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        test_response = model.generate_content("Test connection")
+        test_response = model.generate_content("Test connection",
+                                               generation_config=genai.types.GenerationConfig(
+                                                   temperature=0.1,
+                                                   max_output_tokens=10
+                                               ))
         return True
     except Exception as e:
         st.error(f"Failed to setup Gemini API: {str(e)}")
         return False
 
 
-def optimize_image_for_gemini(image: Image.Image, max_size=(2048, 2048), quality=85):
-    """Optimize image for Gemini API while maintaining text quality"""
+def enhanced_image_optimization_for_gemini(image: Image.Image, quality_mode='high'):
+    """Enhanced image optimization specifically for maximum accuracy"""
     try:
         # Convert to RGB if necessary
         if image.mode in ('RGBA', 'LA', 'P'):
@@ -160,14 +169,29 @@ def optimize_image_for_gemini(image: Image.Image, max_size=(2048, 2048), quality
                                 [-1] if image.mode in ('RGBA', 'LA') else None)
                 image = rgb_image
 
-        # Resize if too large
+        # High-quality mode: maintain higher resolution
+        if quality_mode == 'high':
+            max_size = (3072, 3072)  # Increased from 2048
+            quality = 95  # Increased from 85
+        else:
+            max_size = (2048, 2048)
+            quality = 85
+
+        # Resize more conservatively
         if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
+            # Use high-quality resampling
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
 
-        # Enhance for text recognition
-        enhancer = image
+        # Apply image enhancement for better text recognition
+        # Contrast enhancement
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(1.2)
 
-        # Convert to bytes with optimization
+        # Sharpness enhancement
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(1.1)
+
+        # Convert to bytes with high quality
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG', optimize=True, quality=quality)
         img_byte_arr.seek(0)
@@ -179,96 +203,188 @@ def optimize_image_for_gemini(image: Image.Image, max_size=(2048, 2048), quality
         return image
 
 
-def extract_text_with_gemini_batch(images_data: List[Tuple[int, Image.Image]],
-                                   selected_languages: List[str],
-                                   extraction_type: str = "general") -> Dict[int, Tuple[str, float]]:
-    """Extract text from multiple images using Gemini with intelligent batching"""
+def extract_text_with_gemini_accuracy_focused(images_data: List[Tuple[int, Image.Image]],
+                                              selected_languages: List[str],
+                                              extraction_type: str = "general") -> Dict[int, Tuple[str, float]]:
+    """Extract text using Gemini with maximum accuracy focus"""
     results = {}
 
     try:
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
-        # Language setup
+        # Language setup with better descriptions
         language_names = {
-            'hindi': 'Hindi (हिंदी)', 'sanskrit': 'Sanskrit (संस्कृत)',
-            'bengali': 'Bengali (বাংলা)', 'gujarati': 'Gujarati (ગુજરાતી)',
-            'kannada': 'Kannada (ಕನ್ನಡ)', 'malayalam': 'Malayalam (മലയാളം)',
-            'marathi': 'Marathi (मराठी)', 'punjabi': 'Punjabi (ਪੰਜਾਬੀ)',
-            'tamil': 'Tamil (தமிழ்)', 'telugu': 'Telugu (తెలుగు)',
-            'urdu': 'Urdu (اردو)', 'english': 'English'
+            'hindi': 'Hindi (हिंदी) - Devanagari script',
+            'sanskrit': 'Sanskrit (संस्कृत) - Devanagari script',
+            'bengali': 'Bengali (বাংলা) - Bengali script',
+            'gujarati': 'Gujarati (ગુજરાતી) - Gujarati script',
+            'kannada': 'Kannada (ಕನ್ನಡ) - Kannada script',
+            'malayalam': 'Malayalam (മലയാളം) - Malayalam script',
+            'marathi': 'Marathi (मराठी) - Devanagari script',
+            'punjabi': 'Punjabi (ਪੰਜਾਬੀ) - Gurmukhi script',
+            'tamil': 'Tamil (தமிழ்) - Tamil script',
+            'telugu': 'Telugu (తెలుగు) - Telugu script',
+            'urdu': 'Urdu (اردو) - Arabic script',
+            'english': 'English - Latin script'
         }
 
         selected_lang_names = [language_names.get(
             lang, lang) for lang in selected_languages]
 
-        # Create optimized prompt based on extraction type
+        # Enhanced prompts for maximum accuracy
         if extraction_type == "academic":
-            base_prompt = f"""Extract ALL text from this document page with academic precision:
-
-Languages: {', '.join(selected_lang_names)}
-Focus on: Mathematical formulas, citations, technical terms, tables, headers
-Maintain: Original formatting, structure, line breaks
-Output: Clean, accurate text exactly as shown"""
-
-        elif extraction_type == "indic_specialized":
-            base_prompt = f"""Expert extraction for Indian language document:
+            base_prompt = f"""You are an expert document digitization specialist. Extract ALL text from this academic document with absolute precision:
 
 Target Languages: {', '.join(selected_lang_names)}
-Expertise: Complex scripts, diacritical marks, conjuncts, cultural context
-Accuracy: Perfect character recognition, proper word boundaries
-Output: Culturally and linguistically accurate text"""
+
+CRITICAL REQUIREMENTS:
+1. Extract EVERY visible character, symbol, number, and punctuation mark
+2. Preserve exact formatting: line breaks, spacing, indentation, bullet points
+3. Maintain mathematical formulas, equations, and special symbols exactly as shown
+4. Preserve table structures, headers, and footnotes
+5. Include ALL references, citations, and bibliographic information
+6. Capture figure captions, table titles, and margin notes
+7. Maintain original text hierarchy (headings, subheadings, paragraphs)
+
+ACCURACY STANDARDS:
+- Zero tolerance for missing text
+- Perfect character-level accuracy required
+- Preserve all diacritical marks and special characters
+- Maintain exact punctuation and spacing
+
+Output the complete, unmodified text exactly as it appears in the document."""
+
+        elif extraction_type == "indic_specialized":
+            base_prompt = f"""You are a master specialist in Indian language document processing. Extract text with cultural and linguistic expertise:
+
+Target Languages: {', '.join(selected_lang_names)}
+
+EXPERT REQUIREMENTS:
+1. Perfect recognition of complex Indic scripts and conjunct characters
+2. Accurate handling of diacritical marks, matras, and combining characters  
+3. Proper word segmentation respecting linguistic boundaries
+4. Cultural context awareness for proper noun recognition
+5. Accurate transliteration preservation where present
+6. Perfect handling of Sanskrit verses, religious texts, and cultural terminology
+7. Precise recognition of regional script variations
+
+SCRIPT-SPECIFIC EXPERTISE:
+- Devanagari: Perfect conjunct recognition, proper matra placement
+- Bengali: Accurate handling of complex ligatures and vowel marks
+- Tamil: Proper recognition of agglutinative word structures
+- Telugu/Kannada: Correct handling of vowel-consonant combinations
+- Arabic (Urdu): Right-to-left text flow, proper diacritic marks
+
+Extract with 100% cultural and linguistic accuracy."""
 
         elif extraction_type == "handwritten":
-            base_prompt = f"""Extract text from this handwritten document:
+            base_prompt = f"""You are an expert paleographer specializing in handwritten document analysis:
 
-Languages: {', '.join(selected_lang_names)}
-Handle: Cursive writing, individual variations, unclear sections
-Output: Complete text, mark uncertain parts with [?] if needed"""
+Target Languages: {', '.join(selected_lang_names)}
 
-        else:  # general
-            base_prompt = f"""Extract ALL visible text from this image:
+HANDWRITING ANALYSIS REQUIREMENTS:
+1. Carefully analyze individual character formations and writing style
+2. Consider contextual clues for ambiguous characters
+3. Handle cursive connections and character variations
+4. Recognize personal writing idiosyncrasies and abbreviations
+5. Use linguistic context to resolve unclear characters
+6. Maintain original punctuation and formatting choices
+7. Preserve author's spacing and paragraph structures
 
-Languages: {', '.join(selected_lang_names)}
-Requirements: Complete accuracy, maintain formatting, preserve structure
-Output: Clean, unmodified text exactly as it appears"""
+ACCURACY APPROACH:
+- Character-by-character careful analysis
+- Cross-reference unclear portions with context
+- Mark genuinely unclear sections with [UNCLEAR] rather than guessing
+- Maintain original capitalization and punctuation patterns
+- Preserve personal formatting choices and emphasis
 
-        # Process images individually with rate limiting
+Extract with scholarly precision, noting any uncertainties clearly."""
+
+        else:  # general - enhanced for accuracy
+            base_prompt = f"""You are a professional document digitization expert. Extract ALL text with maximum accuracy:
+
+Target Languages: {', '.join(selected_lang_names)}
+
+PRECISION REQUIREMENTS:
+1. Extract EVERY visible text element without exception
+2. Maintain exact formatting: paragraphs, line breaks, spacing
+3. Preserve ALL punctuation marks, symbols, and special characters
+4. Include headers, footers, page numbers, and watermarks
+5. Capture table contents with proper structure
+6. Include figure captions, labels, and annotations
+7. Maintain original text hierarchy and organization
+
+QUALITY STANDARDS:
+- Perfect character-level accuracy
+- Zero missing text tolerance
+- Exact punctuation preservation
+- Original formatting maintenance
+- Complete content capture
+
+Provide the complete, unaltered text exactly as shown in the document."""
+
+        # Process images individually with enhanced accuracy measures
         for page_num, image in images_data:
             try:
-                # Rate limiting
+                # Enhanced rate limiting for accuracy
                 rate_limiter.wait_if_needed()
 
-                # Optimize image
-                optimized_image = optimize_image_for_gemini(image)
+                # High-quality image optimization
+                optimized_image = enhanced_image_optimization_for_gemini(
+                    image, 'high')
 
                 # Memory check
                 if get_memory_usage() > memory_threshold:
                     cleanup_memory()
 
-                # Make API call
-                response = model.generate_content(
-                    [base_prompt, optimized_image],
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.1,
-                        top_p=0.8,
-                        max_output_tokens=4096,
-                    )
+                # Enhanced generation config for accuracy
+                generation_config = genai.types.GenerationConfig(
+                    temperature=0.05,  # Lower temperature for consistency
+                    top_p=0.9,        # Slightly higher for better coverage
+                    top_k=40,         # Add top_k for more focused responses
+                    max_output_tokens=8192,  # Increased token limit
+                    candidate_count=1
                 )
 
-                extracted_text = response.text if response.text else ""
+                # Make API call with retry logic for accuracy
+                max_retries = 3
+                best_response = None
+                best_length = 0
 
-                # Estimate confidence
-                confidence = 92.0
-                if len(extracted_text.strip()) < 10:
-                    confidence = 35.0
-                elif not any(char.isalpha() for char in extracted_text):
-                    confidence = 55.0
-                elif len(extracted_text.strip()) < 50:
-                    confidence = 70.0
-                elif any(lang in ['hindi', 'sanskrit', 'bengali', 'tamil'] for lang in selected_languages):
-                    confidence = min(96.0, confidence + 4.0)
+                for attempt in range(max_retries):
+                    try:
+                        response = model.generate_content(
+                            [base_prompt, optimized_image],
+                            generation_config=generation_config
+                        )
+
+                        if response.text and len(response.text.strip()) > best_length:
+                            best_response = response.text
+                            best_length = len(response.text.strip())
+
+                        # If we get a good response, break early
+                        if best_length > 100:
+                            break
+
+                    except Exception as retry_error:
+                        if attempt == max_retries - 1:
+                            raise retry_error
+                        time.sleep(2 * (attempt + 1))  # Progressive backoff
+
+                extracted_text = best_response if best_response else ""
+
+                # Enhanced confidence calculation
+                confidence = calculate_enhanced_confidence(
+                    extracted_text, selected_languages, image.size)
 
                 results[page_num] = (extracted_text, confidence)
+
+                # Enhanced logging for accuracy tracking
+                if extracted_text:
+                    st.write(
+                        f"✅ Page {page_num + 1}: {len(extracted_text)} characters extracted (confidence: {confidence:.1f}%)")
+                else:
+                    st.warning(f"⚠️ Page {page_num + 1}: No text extracted")
 
                 # Clean up
                 del optimized_image
@@ -276,23 +392,67 @@ Output: Clean, unmodified text exactly as it appears"""
                     cleanup_memory()
 
             except Exception as e:
-                st.warning(
+                st.error(
                     f"Gemini extraction failed for page {page_num + 1}: {str(e)}")
                 results[page_num] = ("", 0)
 
-                # If we hit rate limits, increase delay
+                # Enhanced error handling for rate limits
                 if "rate limit" in str(e).lower() or "quota" in str(e).lower():
-                    time.sleep(5)
-                    rate_limiter.consecutive_calls += 3
+                    st.warning("Rate limit hit, implementing longer delay...")
+                    time.sleep(10)
+                    rate_limiter.consecutive_calls += 5
 
     except Exception as e:
-        st.error(f"Batch Gemini extraction failed: {str(e)}")
+        st.error(f"Gemini batch extraction failed: {str(e)}")
 
     return results
 
 
-def preprocess_image_for_indic_ocr(image, language_script='devanagari'):
-    """Enhanced image preprocessing specifically for Indic scripts"""
+def calculate_enhanced_confidence(text: str, languages: List[str], image_size: tuple) -> float:
+    """Calculate confidence score with enhanced accuracy metrics"""
+    if not text or not text.strip():
+        return 0.0
+
+    base_confidence = 85.0
+
+    # Text length factor
+    text_length = len(text.strip())
+    if text_length > 1000:
+        base_confidence += 10.0
+    elif text_length > 500:
+        base_confidence += 5.0
+    elif text_length < 50:
+        base_confidence -= 30.0
+
+    # Language-specific bonus
+    if any(lang in ['hindi', 'sanskrit', 'bengali', 'tamil'] for lang in languages):
+        # Check for Indic characters
+        indic_char_count = sum(1 for char in text if ord(
+            char) > 2304 and ord(char) < 3071)
+        if indic_char_count > 0:
+            base_confidence += 8.0
+
+    # Structure indicators (good formatting suggests accurate extraction)
+    structure_score = 0
+    if '\n\n' in text:  # Paragraph breaks
+        structure_score += 2
+    if any(char in text for char in '.,;:!?'):  # Punctuation
+        structure_score += 3
+    if any(char.isupper() for char in text):  # Capital letters
+        structure_score += 2
+
+    base_confidence += min(structure_score, 7)
+
+    # Penalize very short extractions relative to image size
+    pixel_count = image_size[0] * image_size[1]
+    if pixel_count > 1000000 and text_length < 100:  # Large image, little text
+        base_confidence -= 20.0
+
+    return max(10.0, min(98.0, base_confidence))
+
+
+def enhanced_preprocess_image_for_indic_ocr(image, language_script='devanagari'):
+    """Enhanced image preprocessing with multiple techniques for maximum accuracy"""
     try:
         # Convert PIL to OpenCV format
         img_array = np.array(image)
@@ -303,46 +463,69 @@ def preprocess_image_for_indic_ocr(image, language_script='devanagari'):
         else:
             gray = img_array
 
-        # Apply different preprocessing based on script
+        # Apply multiple preprocessing techniques and choose the best
+        processed_versions = []
+
+        # Method 1: Enhanced CLAHE with script-specific parameters
         if language_script in ['devanagari', 'bengali', 'gujarati']:
-            # For Devanagari-based scripts
-            # Apply CLAHE for better contrast
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
             enhanced = clahe.apply(gray)
-
-            # Slight blur to connect broken characters
+            # Slight blur to connect broken characters in complex scripts
             blurred = cv2.GaussianBlur(enhanced, (1, 1), 0)
+            thresh1 = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY, 11, 2)
+            processed_versions.append(('clahe_adaptive', thresh1))
 
-            # Adaptive thresholding
-            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                           cv2.THRESH_BINARY, 11, 2)
-        else:
-            # For other scripts
-            # Apply CLAHE
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
+        # Method 2: Otsu thresholding with enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(12, 12))
+        enhanced = clahe.apply(gray)
+        _, thresh2 = cv2.threshold(
+            enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        processed_versions.append(('otsu', thresh2))
 
-            # Otsu thresholding
-            _, thresh = cv2.threshold(
-                enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Method 3: Bilateral filter + adaptive threshold
+        filtered = cv2.bilateralFilter(gray, 9, 75, 75)
+        thresh3 = cv2.adaptiveThreshold(filtered, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                        cv2.THRESH_BINARY, 15, 10)
+        processed_versions.append(('bilateral', thresh3))
 
-        # Morphological operations to clean up
+        # Method 4: Morphological operations
+        kernel = np.ones((2, 2), np.uint8)
+        morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        _, thresh4 = cv2.threshold(
+            morph, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        processed_versions.append(('morphological', thresh4))
+
+        # Choose the best version based on text characteristics
+        best_version = processed_versions[0][1]  # Default to first
+
+        # For now, return the CLAHE version as it generally works well
+        # In a production system, you might want to test each version with OCR
+        for name, version in processed_versions:
+            if name == 'clahe_adaptive' and language_script in ['devanagari', 'bengali', 'gujarati']:
+                best_version = version
+                break
+            elif name == 'otsu':
+                best_version = version
+                break
+
+        # Final cleanup
         kernel = np.ones((1, 1), np.uint8)
-        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        cleaned = cv2.morphologyEx(best_version, cv2.MORPH_CLOSE, kernel)
 
         # Convert back to PIL Image
         return Image.fromarray(cleaned)
 
     except Exception as e:
         st.warning(
-            f"Image preprocessing failed: {str(e)}, using original image")
+            f"Enhanced image preprocessing failed: {str(e)}, using original image")
         return image
 
 
-def extract_text_with_indic_ocr_batch(images_data: List[Tuple[int, Image.Image]],
-                                      selected_languages: List[str],
-                                      preprocessing=True) -> Dict[int, Tuple[str, float]]:
-    """Extract text from multiple images using Tesseract OCR with batch processing"""
+def extract_text_with_enhanced_indic_ocr(images_data: List[Tuple[int, Image.Image]],
+                                         selected_languages: List[str],
+                                         preprocessing=True) -> Dict[int, Tuple[str, float]]:
+    """Enhanced OCR extraction with multiple attempts for maximum accuracy"""
     results = {}
 
     try:
@@ -358,791 +541,699 @@ def extract_text_with_indic_ocr_batch(images_data: List[Tuple[int, Image.Image]]
         elif any(lang in ['tamil', 'malayalam', 'kannada', 'telugu'] for lang in selected_languages):
             script_type = 'south_indian'
 
-        # Process images
+        # Process images with enhanced accuracy focus
         for page_num, image in images_data:
             try:
-                # Preprocess image if enabled
-                if preprocessing:
-                    processed_image = preprocess_image_for_indic_ocr(
-                        image, script_type)
-                else:
-                    processed_image = image
-
-                # Try different PSM modes for better recognition
-                psm_modes = [6, 4, 3, 8, 13]
                 best_text = ""
                 best_confidence = 0
 
-                for psm in psm_modes:
-                    try:
-                        config = f'--oem 3 --psm {psm} -c preserve_interword_spaces=1'
+                # Try multiple preprocessing approaches
+                preprocessing_methods = []
 
-                        # Get OCR result with confidence scores
-                        data = pytesseract.image_to_data(processed_image, lang=lang_string,
-                                                         config=config, output_type=pytesseract.Output.DICT)
+                if preprocessing:
+                    # Enhanced preprocessing
+                    processed_image = enhanced_preprocess_image_for_indic_ocr(
+                        image, script_type)
+                    preprocessing_methods.append(('enhanced', processed_image))
 
-                        # Calculate average confidence
-                        confidences = [int(conf)
-                                       for conf in data['conf'] if int(conf) > 0]
-                        avg_confidence = sum(
-                            confidences) / len(confidences) if confidences else 0
+                    # Original image as backup
+                    preprocessing_methods.append(('original', image))
+                else:
+                    preprocessing_methods.append(('original', image))
 
-                        # Get text
-                        text = pytesseract.image_to_string(
-                            processed_image, lang=lang_string, config=config)
+                # Try different combinations of settings
+                for preprocess_name, proc_image in preprocessing_methods:
+                    # Try multiple PSM modes with enhanced settings
+                    psm_configs = [
+                        (6, '--oem 3 --psm 6 -c preserve_interword_spaces=1 -c textord_heavy_nr=1'),
+                        (4, '--oem 3 --psm 4 -c preserve_interword_spaces=1'),
+                        (3, '--oem 3 --psm 3 -c preserve_interword_spaces=1'),
+                        (8, '--oem 3 --psm 8 -c preserve_interword_spaces=1'),
+                        (13, '--oem 3 --psm 13 -c preserve_interword_spaces=1')
+                    ]
 
-                        # Keep the result with highest confidence
-                        if avg_confidence > best_confidence and text.strip():
-                            best_confidence = avg_confidence
-                            best_text = text
+                    for psm, config in psm_configs:
+                        try:
+                            # Get OCR result with confidence scores
+                            data = pytesseract.image_to_data(proc_image, lang=lang_string,
+                                                             config=config, output_type=pytesseract.Output.DICT)
 
-                    except Exception as psm_error:
-                        continue
+                            # Calculate average confidence
+                            confidences = [
+                                int(conf) for conf in data['conf'] if int(conf) > 0]
+                            avg_confidence = sum(
+                                confidences) / len(confidences) if confidences else 0
 
-                results[page_num] = (best_text, best_confidence)
+                            # Get text
+                            text = pytesseract.image_to_string(
+                                proc_image, lang=lang_string, config=config)
 
-                # Memory cleanup
-                del processed_image
+                            # Enhanced scoring that considers both confidence and text quality
+                            quality_score = avg_confidence
+                            if text.strip():
+                                # Bonus for longer text (usually indicates better extraction)
+                                length_bonus = min(10, len(text.strip()) / 50)
+                                quality_score += length_bonus
+
+                                # Bonus for proper word structure
+                                words = text.split()
+                                if len(words) > 2:
+                                    quality_score += 5
+
+                                # Penalty for too many special characters (usually indicates poor OCR)
+                                special_char_ratio = sum(
+                                    1 for c in text if not c.isalnum() and not c.isspace()) / len(text)
+                                if special_char_ratio > 0.3:
+                                    quality_score -= 10
+
+                            # Keep the result with highest quality score
+                            if quality_score > best_confidence and text.strip():
+                                best_confidence = quality_score
+                                best_text = text
+                                st.write(
+                                    f"📄 Page {page_num + 1}: Found better result with {preprocess_name} preprocessing, PSM {psm} (score: {quality_score:.1f})")
+
+                        except Exception as psm_error:
+                            continue
+
+                # Cap confidence at reasonable maximum
+                final_confidence = min(95.0, best_confidence)
+                results[page_num] = (best_text, final_confidence)
+
+                # Clean up processed images
+                for _, proc_img in preprocessing_methods:
+                    if proc_img != image:  # Don't delete original
+                        del proc_img
+
                 if get_memory_usage() > memory_threshold:
                     cleanup_memory()
 
             except Exception as e:
                 st.warning(
-                    f"OCR extraction failed for page {page_num + 1}: {str(e)}")
+                    f"Enhanced OCR extraction failed for page {page_num + 1}: {str(e)}")
                 results[page_num] = ("", 0)
 
     except Exception as e:
-        st.error(f"Batch OCR extraction failed: {str(e)}")
+        st.error(f"Enhanced batch OCR extraction failed: {str(e)}")
 
     return results
 
 
-def process_page_batch(pdf_document, page_range: range, extraction_method: str,
-                       selected_languages: List[str], enable_preprocessing: bool,
-                       gemini_extraction_type: str = "general") -> Dict[int, Dict]:
-    """Process a batch of pages efficiently"""
+def process_page_batch_accuracy_focused(pdf_document, page_range: range, extraction_method: str,
+                                        selected_languages: List[str], enable_preprocessing: bool,
+                                        gemini_extraction_type: str = "general") -> Dict[int, Dict]:
+    """Process a batch of pages with accuracy as the primary focus"""
     batch_results = {}
-    images_for_ai = []
 
     try:
-        # First pass: extract regular text and prepare images for AI processing
-        for page_num in page_range:
-            try:
-                # Access page
-                page = pdf_document[page_num]
+        st.info(
+            f"🎯 Processing pages {page_range.start + 1}-{page_range.stop} with {extraction_method} method (accuracy-focused)")
 
-                # Try regular text extraction first
-                page_text = page.get_text()
+        # For Gemini-only mode, skip regular text extraction entirely
+        if extraction_method == "gemini":
+            images_for_gemini = []
 
-                # If no meaningful text, prepare for AI extraction
-                if not page_text.strip() or len(page_text.strip()) < 10:
-                    # Convert page to image with optimized settings
-                    # Slightly reduced resolution for speed
-                    mat = fitz.Matrix(2.5, 2.5)
+            # Convert all pages to high-quality images for Gemini processing
+            for page_num in page_range:
+                try:
+                    page = pdf_document[page_num]
+
+                    # High-resolution image extraction for maximum accuracy
+                    # Higher resolution for better accuracy
+                    mat = fitz.Matrix(3.0, 3.0)
                     pix = page.get_pixmap(matrix=mat)
                     img_data = pix.tobytes("png")
                     img = Image.open(io.BytesIO(img_data))
 
-                    images_for_ai.append((page_num, img))
+                    images_for_gemini.append((page_num, img))
 
                     batch_results[page_num] = {
                         'text': '',
-                        'method': 'pending_ai',
+                        'method': 'pending_gemini',
                         'confidence': 0
                     }
-                else:
+
+                except Exception as e:
                     batch_results[page_num] = {
-                        'text': page_text,
-                        'method': 'regular',
-                        'confidence': 95.0
+                        'text': f"Error preparing page for Gemini: {str(e)}",
+                        'method': 'error',
+                        'confidence': 0
                     }
 
-            except Exception as e:
-                batch_results[page_num] = {
-                    'text': f"Error processing page: {str(e)}",
-                    'method': 'error',
-                    'confidence': 0
-                }
-
-        # Second pass: AI extraction for pages that need it
-        if images_for_ai:
-            if extraction_method in ["gemini", "hybrid"]:
-                # Use Gemini for batch processing
-                gemini_results = extract_text_with_gemini_batch(
-                    images_for_ai, selected_languages, gemini_extraction_type)
+            # Process all pages with Gemini
+            if images_for_gemini:
+                st.info(
+                    f"🤖 Processing {len(images_for_gemini)} pages with Gemini AI...")
+                gemini_results = extract_text_with_gemini_accuracy_focused(
+                    images_for_gemini, selected_languages, gemini_extraction_type)
 
                 # Update results
                 for page_num, (text, confidence) in gemini_results.items():
-                    if text.strip():
+                    batch_results[page_num] = {
+                        'text': text,
+                        'method': 'gemini',
+                        'confidence': confidence
+                    }
+
+            # Clean up
+            for _, img in images_for_gemini:
+                del img
+            del images_for_gemini
+
+        else:
+            # For other methods, use the original logic but with enhancements
+            images_for_ai = []
+
+            # First pass: extract regular text and prepare images for AI processing
+            for page_num in page_range:
+                try:
+                    page = pdf_document[page_num]
+
+                    # Try regular text extraction first (except for gemini-only mode)
+                    page_text = page.get_text()
+
+                    # Enhanced criteria for when to use AI extraction
+                    needs_ai_extraction = (
+                        not page_text.strip() or
+                        len(page_text.strip()) < 20 or  # Stricter threshold
+                        extraction_method in ["tesseract_ocr", "hybrid"]
+                    )
+
+                    if needs_ai_extraction:
+                        # Convert page to high-quality image
+                        mat = fitz.Matrix(3.0, 3.0)  # Higher resolution
+                        pix = page.get_pixmap(matrix=mat)
+                        img_data = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_data))
+
+                        images_for_ai.append((page_num, img))
+
                         batch_results[page_num] = {
-                            'text': text,
-                            'method': 'gemini',
-                            'confidence': confidence
+                            'text': page_text if page_text.strip() else '',
+                            'method': 'pending_ai',
+                            'confidence': 50.0 if page_text.strip() else 0
+                        }
+                    else:
+                        batch_results[page_num] = {
+                            'text': page_text,
+                            'method': 'regular',
+                            'confidence': 95.0
                         }
 
-            if extraction_method in ["tesseract_ocr", "hybrid"]:
-                # Use OCR for batch processing
-                ocr_results = extract_text_with_indic_ocr_batch(
-                    images_for_ai, selected_languages, enable_preprocessing)
+                except Exception as e:
+                    batch_results[page_num] = {
+                        'text': f"Error processing page: {str(e)}",
+                        'method': 'error',
+                        'confidence': 0
+                    }
 
-                # For hybrid mode, compare and choose better result
-                if extraction_method == "hybrid":
-                    for page_num, (ocr_text, ocr_conf) in ocr_results.items():
-                        current_result = batch_results.get(page_num, {})
+            # AI extraction for pages that need it
+            if images_for_ai:
+                if extraction_method in ["gemini", "hybrid"]:
+                    st.info(
+                        f"🤖 Processing {len(images_for_ai)} pages with Gemini AI...")
+                    gemini_results = extract_text_with_gemini_accuracy_focused(
+                        images_for_ai, selected_languages, gemini_extraction_type)
 
-                        # Choose better result based on confidence and text length
-                        if (current_result.get('method') == 'gemini' and
-                                current_result.get('confidence', 0) > ocr_conf):
-                            continue  # Keep Gemini result
-                        elif ocr_text.strip() and (ocr_conf > current_result.get('confidence', 0) or
-                                                   len(ocr_text) > len(current_result.get('text', '')) * 1.2):
-                            batch_results[page_num] = {
-                                'text': ocr_text,
-                                'method': 'tesseract',
-                                'confidence': ocr_conf
-                            }
-                else:
-                    # For tesseract_ocr mode, use OCR results directly
-                    for page_num, (text, confidence) in ocr_results.items():
+                    # Update results
+                    for page_num, (text, confidence) in gemini_results.items():
                         if text.strip():
                             batch_results[page_num] = {
                                 'text': text,
-                                'method': 'tesseract',
+                                'method': 'gemini',
                                 'confidence': confidence
                             }
 
-        # Clean up images from memory
-        for _, img in images_for_ai:
-            del img
-        del images_for_ai
-        cleanup_memory()
+                if extraction_method in ["tesseract_ocr", "hybrid"]:
+                    st.info(
+                        f"🔍 Processing {len(images_for_ai)} pages with Enhanced OCR...")
+                    ocr_results = extract_text_with_enhanced_indic_ocr(
+                        images_for_ai, selected_languages, enable_preprocessing)
+
+                    # Update results for OCR
+                    for page_num, (text, confidence) in ocr_results.items():
+                        if extraction_method == "tesseract_ocr":
+                            # Pure OCR mode
+                            batch_results[page_num] = {
+                                'text': text,
+                                'method': 'enhanced_ocr',
+                                'confidence': confidence
+                            }
+                        elif extraction_method == "hybrid":
+                            # Hybrid mode: combine or choose best result
+                            existing_text = batch_results[page_num]['text']
+                            existing_confidence = batch_results[page_num]['confidence']
+
+                            # Choose the result with higher confidence
+                            if confidence > existing_confidence and text.strip():
+                                batch_results[page_num] = {
+                                    'text': text,
+                                    'method': 'enhanced_ocr',
+                                    'confidence': confidence
+                                }
+                            elif existing_text.strip() and text.strip():
+                                # If both have decent confidence, combine them
+                                combined_text = existing_text + "\n\n--- OCR Enhancement ---\n\n" + text
+                                batch_results[page_num] = {
+                                    'text': combined_text,
+                                    'method': 'hybrid',
+                                    'confidence': max(existing_confidence, confidence)
+                                }
+
+            # Clean up images
+            for _, img in images_for_ai:
+                del img
+            del images_for_ai
+
+        # Memory cleanup after batch processing
+        if get_memory_usage() > memory_threshold:
+            cleanup_memory()
 
     except Exception as e:
-        st.error(f"Batch processing error: {str(e)}")
+        st.error(f"Batch processing failed: {str(e)}")
 
     return batch_results
 
 
-def set_indic_font_in_docx(doc, font_name='Nirmala UI'):
-    """Set Indic-compatible font for Word document"""
+def merge_extraction_results(results_dict: Dict[int, Dict]) -> str:
+    """Merge extracted text from all pages with enhanced formatting"""
     try:
-        # Set default font for the document
-        styles = doc.styles
-        style = styles['Normal']
-        font = style.font
-        font.name = font_name
+        merged_text = []
 
-        # Also set for complex scripts (required for Indic text)
-        rFonts = style.element.rPr.rFonts if style.element.rPr is not None else None
-        if rFonts is not None:
-            rFonts.set(qn('w:cs'), font_name)  # Complex Script font
-            rFonts.set(qn('w:ascii'), font_name)  # ASCII font
-            rFonts.set(qn('w:hAnsi'), font_name)  # High ANSI font
+        # Sort pages by number
+        sorted_pages = sorted(results_dict.keys())
+
+        for page_num in sorted_pages:
+            page_data = results_dict[page_num]
+            text = page_data.get('text', '').strip()
+            method = page_data.get('method', 'unknown')
+            confidence = page_data.get('confidence', 0)
+
+            if text:
+                # Add page header with metadata
+                page_header = f"\n{'='*60}\nPAGE {page_num + 1} | Method: {method.upper()} | Confidence: {confidence:.1f}%\n{'='*60}\n"
+                merged_text.append(page_header)
+                merged_text.append(text)
+                merged_text.append("\n")
+            else:
+                # Even for empty pages, add a note
+                page_header = f"\n{'='*60}\nPAGE {page_num + 1} | No text extracted\n{'='*60}\n"
+                merged_text.append(page_header)
+
+        return "\n".join(merged_text)
 
     except Exception as e:
-        st.warning(f"Could not set Indic font: {str(e)}")
+        st.error(f"Error merging results: {str(e)}")
+        return "Error merging extraction results"
 
 
-def extract_text_from_pdf(pdf_file, extraction_method="regular", selected_languages=['hindi', 'english'],
-                          enable_preprocessing=True, selected_font='Nirmala UI',
-                          gemini_extraction_type="general", batch_size=10):
-    """Enhanced PDF text extraction with batch processing for large files"""
+def create_enhanced_docx_with_metadata(text_content: str, extraction_metadata: Dict) -> io.BytesIO:
+    """Create a professional DOCX document with extraction metadata"""
     try:
-        # File validation
-        file_size_mb = pdf_file.size / (1024 * 1024)
+        doc = Document()
 
-        if pdf_file.size < 100:
-            st.error(
-                f"File is too small ({pdf_file.size} bytes) to be a valid PDF.")
-            return None
+        # Title
+        title = doc.add_heading('PDF Text Extraction Report', 0)
+        title.alignment = 1  # Center alignment
 
-        if file_size_mb > 200:
-            st.warning(
-                f"Very large file detected ({file_size_mb:.1f}MB). Processing will be done in batches.")
-            # Adjust batch size for very large files
-            batch_size = max(5, min(batch_size, 15))
+        # Metadata section
+        doc.add_heading('Extraction Details', level=1)
 
-        # Read PDF
-        pdf_bytes = pdf_file.read()
+        # Add metadata table
+        metadata_table = doc.add_table(rows=1, cols=2)
+        metadata_table.style = 'Table Grid'
+        hdr_cells = metadata_table.rows[0].cells
+        hdr_cells[0].text = 'Property'
+        hdr_cells[1].text = 'Value'
 
-        if not pdf_bytes.startswith(b'%PDF'):
-            st.error("This doesn't appear to be a valid PDF file.")
-            return None
+        # Add metadata rows
+        for key, value in extraction_metadata.items():
+            row_cells = metadata_table.add_row().cells
+            row_cells[0].text = str(key).replace('_', ' ').title()
+            row_cells[1].text = str(value)
 
-        # Open PDF
-        try:
-            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-        except Exception as pdf_error:
-            st.error(f"Cannot open PDF file: {str(pdf_error)}")
-            return None
+        # Add page break
+        doc.add_page_break()
 
-        # Get page count
-        try:
-            page_count = len(pdf_document)
-        except:
-            try:
-                page_count = pdf_document.page_count
-            except:
-                page_count = pdf_document.pageCount
+        # Content section
+        doc.add_heading('Extracted Content', level=1)
 
-        if page_count == 0:
-            st.error("PDF has no pages or pages cannot be accessed.")
-            pdf_document.close()
-            return None
+        # Add the main content
+        content_paragraph = doc.add_paragraph()
+        content_paragraph.add_run(text_content)
 
-        st.info(f"📄 PDF loaded: {page_count} pages found")
-        st.info(
-            f"🎯 Method: {extraction_method.title()} | Batch size: {batch_size}")
-        st.info(f"🌐 Languages: {', '.join(selected_languages)}")
+        # Save to BytesIO
+        doc_buffer = io.BytesIO()
+        doc.save(doc_buffer)
+        doc_buffer.seek(0)
 
-        # Initialize tracking variables
-        text_content = ""
-        pages_with_text = 0
-        pages_without_text = 0
-        extraction_stats = {"regular": 0, "tesseract": 0, "gemini": 0}
-
-        # Create progress tracking
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        # Process pages in batches
-        total_batches = (page_count + batch_size - 1) // batch_size
-
-        for batch_idx in range(total_batches):
-            start_page = batch_idx * batch_size
-            end_page = min(start_page + batch_size, page_count)
-
-            status_text.text(
-                f"Processing batch {batch_idx + 1}/{total_batches} (pages {start_page + 1}-{end_page})...")
-
-            # Process batch
-            batch_results = process_page_batch(
-                pdf_document,
-                range(start_page, end_page),
-                extraction_method,
-                selected_languages,
-                enable_preprocessing,
-                gemini_extraction_type
-            )
-
-            # Compile results
-            for page_num in range(start_page, end_page):
-                result = batch_results.get(page_num, {})
-                page_text = result.get('text', '')
-                method_used = result.get('method', 'error')
-                confidence = result.get('confidence', 0)
-
-                # Update statistics
-                if method_used in extraction_stats:
-                    extraction_stats[method_used] += 1
-
-                # Add to content
-                if page_text.strip() and len(page_text.strip()) > 10:
-                    if confidence > 0:
-                        text_content += f"[{method_used.upper()} - Confidence: {confidence:.1f}%]\n"
-                    text_content += page_text
-                    text_content += f"\n\n--- End of Page {page_num + 1} ({method_used.title()}) ---\n\n"
-                    pages_with_text += 1
-                else:
-                    text_content += f"\n--- Page {page_num + 1} (No text found) ---\n"
-                    pages_without_text += 1
-
-            # Update progress
-            progress_bar.progress((batch_idx + 1) / total_batches)
-
-            # Memory management
-            if get_memory_usage() > memory_threshold:
-                cleanup_memory()
-                st.info(
-                    f"🧹 Memory cleanup performed after batch {batch_idx + 1}")
-
-            # Batch delay to prevent overwhelming the system
-            if batch_idx < total_batches - 1:  # Don't delay after last batch
-                time.sleep(0.5)
-
-        # Clear progress indicators
-        progress_bar.empty()
-        status_text.empty()
-        pdf_document.close()
-
-        # Show extraction summary
-        st.subheader("📊 Extraction Summary")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Pages with Text", pages_with_text,
-                      delta=f"{(pages_with_text/page_count)*100:.1f}%")
-        with col2:
-            st.metric("Pages without Text", pages_without_text)
-        with col3:
-            st.metric("Total Pages", page_count)
-        with col4:
-            success_rate = (pages_with_text / page_count) * 100
-            st.metric("Success Rate", f"{success_rate:.1f}%")
-
-        # Show extraction method breakdown
-        if any(count > 0 for count in extraction_stats.values()):
-            st.subheader("🔍 Extraction Method Breakdown")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Regular Text", extraction_stats["regular"],
-                          help="Direct text extraction from PDF")
-            with col2:
-                st.metric("Tesseract OCR", extraction_stats["tesseract"],
-                          help="OCR-based text recognition")
-            with col3:
-                st.metric("Gemini AI", extraction_stats["gemini"],
-                          help="AI-powered text extraction")
-
-        # Performance metrics
-        if file_size_mb > 10:
-            st.subheader("⚡ Performance Metrics")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("File Size", f"{file_size_mb:.1f} MB")
-            with col2:
-                st.metric("Batch Size Used", batch_size)
-            with col3:
-                memory_used = get_memory_usage()
-                st.metric("Memory Usage", f"{memory_used:.1f}%")
-
-        # Final cleanup
-        cleanup_memory()
-
-        # Validate results
-        if not text_content.strip() or len(text_content.strip()) < 50:
-            st.error("❌ No meaningful text could be extracted.")
-            st.info("💡 Try switching to a different extraction method.")
-            return None
-
-        return text_content
+        return doc_buffer
 
     except Exception as e:
-        st.error(f"❌ Error extracting text from PDF: {str(e)}")
+        st.error(f"Error creating DOCX: {str(e)}")
         return None
 
 
-def create_indic_word_document(text, encoding, font_name='Nirmala UI'):
-    """Create a Word document with Indic font support"""
-    doc = Document()
-
-    # Set Indic font
-    set_indic_font_in_docx(doc, font_name)
-
-    # Add title
-    title = doc.add_heading('Extracted PDF Text with Enhanced AI Support', 0)
-    title_run = title.runs[0]
-    title_run.font.name = font_name
-
-    # Add metadata
-    meta_para = doc.add_paragraph(
-        f'Encoding: {encoding} | Font: {font_name} | Extracted on: {time.strftime("%Y-%m-%d %H:%M:%S")}')
-    meta_run = meta_para.runs[0]
-    meta_run.font.name = font_name
-    meta_run.font.size = Inches(0.15)
-
-    doc.add_paragraph('')
-
-    # Split text into paragraphs and apply Indic font
-    paragraphs = text.split('\n')
-    for para_text in paragraphs:
-        if para_text.strip():
-            para = doc.add_paragraph(para_text)
-            for run in para.runs:
-                run.font.name = font_name
-
-    return doc
-
-
 def main():
-    st.title("🚀 Enhanced Large PDF Text Extractor with AI")
+    """Main Streamlit application with enhanced UI"""
+
+    # Custom CSS for better appearance
     st.markdown("""
-    **Extract text from large PDFs using advanced AI and optimized processing:**
-    - 🤖 **Google Gemini 2.0 Flash** with batch processing
-    - 🔍 **Enhanced Tesseract OCR** with Indic language support  
-    - 📚 **Large file support** with intelligent batching
-    - 🌐 **12+ Indian languages** supported
-    - ⚡ **Memory optimized** for handling 100+ page documents
-    - 📊 **Real-time extraction statistics**
-    """)
+    <style>
+    .main-header {
+        text-align: center;
+        color: #1f77b4;
+        margin-bottom: 30px;
+    }
+    .stProgress > div > div > div > div {
+        background-color: #1f77b4;
+    }
+    .status-box {
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    .success-box {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        color: #155724;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        color: #721c24;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        color: #0c5460;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Main header
+    st.markdown('<h1 class="main-header">🚀 Enhanced Large PDF Text Extractor with AI</h1>',
+                unsafe_allow_html=True)
 
     # Sidebar configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        # API Key Section
-        st.subheader("🔑 API Configuration")
-        gemini_api_key = st.text_input(
-            "Gemini API Key",
-            type="password",
-            help="Required for Gemini AI extraction. Get your free API key from Google AI Studio.",
-            placeholder="Enter your Gemini API key..."
-        )
+        # API Key section
+        st.subheader("🔑 AI Configuration")
+        gemini_api_key = st.text_input("Gemini API Key", type="password",
+                                       help="Enter your Google Gemini API key for AI-powered extraction")
 
-        if gemini_api_key:
-            if setup_gemini(gemini_api_key):
-                st.success("✅ Gemini API configured successfully!")
-            else:
-                st.error("❌ Invalid API key or connection failed")
-
-        st.divider()
-
-        # Extraction Method Selection
-        st.subheader("🎯 Extraction Method")
-        extraction_method = st.selectbox(
-            "Choose extraction method:",
-            ["regular", "tesseract_ocr", "gemini", "hybrid"],
-            index=3,
-            help="""
-            - **Regular**: Fast, works for searchable PDFs
-            - **Tesseract OCR**: Good for scanned documents with clear text
-            - **Gemini**: AI-powered, excellent for complex layouts and handwriting
-            - **Hybrid**: Best of both OCR and AI (recommended)
-            """
-        )
-
-        # Language Selection
-        st.subheader("🌐 Language Support")
-        default_languages = ['hindi', 'english']
+        # Language selection
+        st.subheader("🌐 Language Selection")
+        available_languages = list(INDIC_LANGUAGES.keys())
         selected_languages = st.multiselect(
-            "Select languages:",
-            list(INDIC_LANGUAGES.keys()),
-            default=default_languages,
-            help="Choose all languages present in your document for better accuracy"
+            "Select languages for extraction",
+            available_languages,
+            default=['english', 'hindi'],
+            help="Choose the languages present in your PDF"
         )
 
-        if not selected_languages:
-            st.warning("⚠️ Please select at least one language")
-            selected_languages = ['english']
+        # Extraction method
+        st.subheader("🎯 Extraction Method")
+        extraction_methods = {
+            "hybrid": "🔀 Hybrid (Regular + AI)",
+            "gemini": "🤖 Gemini AI Only",
+            "tesseract_ocr": "🔍 Enhanced OCR Only",
+            "regular": "📄 Regular PDF Text Only"
+        }
 
-        # Gemini-specific settings
-        if extraction_method in ["gemini", "hybrid"]:
-            st.subheader("🤖 AI Settings")
-            if not gemini_api_key:
-                st.warning("⚠️ Gemini API key required for AI extraction")
+        extraction_method = st.selectbox(
+            "Choose extraction method",
+            options=list(extraction_methods.keys()),
+            format_func=lambda x: extraction_methods[x],
+            index=0,
+            help="Hybrid is recommended for best results"
+        )
+
+        # Gemini-specific options
+        if extraction_method in ["hybrid", "gemini"]:
+            st.subheader("🤖 Gemini AI Options")
+            gemini_extraction_types = {
+                "general": "📋 General Document",
+                "academic": "🎓 Academic/Research Paper",
+                "indic_specialized": "🕉️ Indic Languages Specialized",
+                "handwritten": "✍️ Handwritten Text"
+            }
 
             gemini_extraction_type = st.selectbox(
-                "AI Extraction Type:",
-                ["general", "academic", "indic_specialized", "handwritten"],
-                help="""
-                - **General**: Standard text extraction
-                - **Academic**: Optimized for research papers, formulas
-                - **Indic Specialized**: Enhanced for Indian language documents
-                - **Handwritten**: Optimized for handwritten text recognition
-                """
+                "Document Type",
+                options=list(gemini_extraction_types.keys()),
+                format_func=lambda x: gemini_extraction_types[x],
+                help="Choose the type that best matches your document"
             )
         else:
             gemini_extraction_type = "general"
 
-        # OCR-specific settings
-        if extraction_method in ["tesseract_ocr", "hybrid"]:
-            st.subheader("🔍 OCR Settings")
-            enable_preprocessing = st.checkbox(
-                "Enable image preprocessing",
-                value=True,
-                help="Improves OCR accuracy for low-quality scans"
-            )
-        else:
-            enable_preprocessing = True
+        # Processing options
+        st.subheader("⚙️ Processing Options")
+        enable_preprocessing = st.checkbox("Enable Image Preprocessing", value=True,
+                                           help="Applies image enhancement for better OCR results")
 
-        # Font selection for output
-        st.subheader("🎨 Output Settings")
-        selected_font = st.selectbox(
-            "Font for Indic text:",
-            ['Nirmala UI', 'Mangal', 'Arial Unicode MS', 'Devanagari Sangam MN'],
-            help="Choose a font that supports your selected languages"
-        )
+        batch_size = st.slider("Batch Size", min_value=1, max_value=20, value=5,
+                               help="Number of pages to process at once")
 
-        # Advanced settings
-        with st.expander("⚙️ Advanced Settings"):
-            batch_size = st.slider(
-                "Batch size for processing:",
-                min_value=5, max_value=25, value=10,
-                help="Smaller batches use less memory but may be slower"
-            )
+        # Advanced options
+        with st.expander("🔧 Advanced Options"):
+            max_pages = st.number_input("Max Pages to Process", min_value=1, max_value=1000,
+                                        value=100, help="Limit processing to first N pages")
 
-            max_file_size = st.slider(
-                "Max file size (MB):",
-                min_value=10, max_value=500, value=200,
-                help="Maximum allowed file size for upload"
-            )
-
-        # System information
-        st.subheader("💾 System Status")
-        memory_usage = get_memory_usage()
-        if memory_usage > 0:
-            st.metric("Memory Usage", f"{memory_usage:.1f}%")
-            if memory_usage > 80:
-                st.warning("⚠️ High memory usage detected")
+            enable_debug = st.checkbox("Enable Debug Mode", value=False,
+                                       help="Show detailed processing information")
 
     # Main content area
-    st.header("📂 Upload PDF Document")
+    st.header("📁 File Upload")
 
-    # File uploader with validation
     uploaded_file = st.file_uploader(
         "Choose a PDF file",
-        type=['pdf'],
-        help=f"Maximum file size: {max_file_size}MB. Supports scanned and text PDFs."
+        type="pdf",
+        help="Upload the PDF file you want to extract text from"
     )
 
     if uploaded_file is not None:
-        # File validation
-        file_size_mb = uploaded_file.size / (1024 * 1024)
-
-        if file_size_mb > max_file_size:
+        # Validate API key for AI methods
+        if extraction_method in ["hybrid", "gemini"] and not gemini_api_key:
             st.error(
-                f"❌ File too large: {file_size_mb:.1f}MB (max: {max_file_size}MB)")
-            return
+                "🔑 Gemini API key is required for AI-powered extraction methods!")
+            st.stop()
+
+        # Setup Gemini if needed
+        if extraction_method in ["hybrid", "gemini"]:
+            if not setup_gemini(gemini_api_key):
+                st.error(
+                    "❌ Failed to setup Gemini API. Please check your API key.")
+                st.stop()
+            else:
+                st.success("✅ Gemini API setup successful!")
+
+        # Load PDF
+        try:
+            pdf_bytes = uploaded_file.read()
+            pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            total_pages = len(pdf_document)
+
+            st.success(
+                f"📖 PDF loaded successfully! Total pages: {total_pages}")
+
+            # Limit pages if specified
+            pages_to_process = min(total_pages, max_pages)
+            if pages_to_process < total_pages:
+                st.warning(
+                    f"⚠️ Processing limited to first {pages_to_process} pages")
+
+        except Exception as e:
+            st.error(f"❌ Error loading PDF: {str(e)}")
+            st.stop()
 
         # Display file information
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("File Size", f"{file_size_mb:.2f} MB")
+            st.metric("File Size", f"{len(pdf_bytes) / (1024*1024):.1f} MB")
         with col2:
-            st.metric("File Name", uploaded_file.name[:20] + "..." if len(
-                uploaded_file.name) > 20 else uploaded_file.name)
+            st.metric("Total Pages", total_pages)
         with col3:
-            estimated_time = max(1, int(file_size_mb * 0.5))  # Rough estimate
-            st.metric("Est. Processing Time", f"{estimated_time} min")
+            st.metric("Processing Method",
+                      extraction_methods[extraction_method])
 
-        # Pre-processing checks
-        if extraction_method in ["gemini", "hybrid"] and not gemini_api_key:
-            st.error(
-                "❌ Gemini API key is required for the selected extraction method.")
-            st.info(
-                "💡 Either provide an API key or switch to 'Regular' or 'Tesseract OCR' method.")
-            return
+        # Processing section
+        st.header("🚀 Processing")
 
-        # Processing button
-        if st.button("🚀 Extract Text", type="primary", use_container_width=True):
+        if st.button("Start Extraction", type="primary"):
+            start_time = time.time()
 
-            # Pre-processing warnings and tips
-            if file_size_mb > 50:
-                st.info(
-                    "📋 Large file detected. Processing will be done in optimized batches.")
+            # Initialize progress tracking
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            results_container = st.container()
 
-            if extraction_method == "hybrid":
-                st.info("🔄 Hybrid mode: Using both OCR and AI for maximum accuracy.")
+            # Initialize results storage
+            all_results = {}
 
-            # Start extraction with error handling
             try:
-                with st.spinner(f"🔄 Extracting text using {extraction_method.title()} method..."):
-                    start_time = time.time()
+                # Process in batches
+                total_batches = (pages_to_process +
+                                 batch_size - 1) // batch_size
 
-                    # Extract text
-                    extracted_text = extract_text_from_pdf(
-                        uploaded_file,
-                        extraction_method=extraction_method,
-                        selected_languages=selected_languages,
-                        enable_preprocessing=enable_preprocessing,
-                        selected_font=selected_font,
-                        gemini_extraction_type=gemini_extraction_type,
-                        batch_size=batch_size
+                for batch_idx in range(total_batches):
+                    start_page = batch_idx * batch_size
+                    end_page = min((batch_idx + 1) *
+                                   batch_size, pages_to_process)
+                    page_range = range(start_page, end_page)
+
+                    # Update progress
+                    progress = (batch_idx + 1) / total_batches
+                    progress_bar.progress(progress)
+                    status_text.text(
+                        f"Processing batch {batch_idx + 1}/{total_batches} (pages {start_page + 1}-{end_page})")
+
+                    # Process batch
+                    batch_results = process_page_batch_accuracy_focused(
+                        pdf_document, page_range, extraction_method,
+                        selected_languages, enable_preprocessing, gemini_extraction_type
                     )
 
-                    processing_time = time.time() - start_time
+                    # Store results
+                    all_results.update(batch_results)
 
-                if extracted_text:
-                    st.success(
-                        f"✅ Text extraction completed in {processing_time:.1f} seconds!")
+                    # Show intermediate results
+                    if enable_debug:
+                        with results_container:
+                            st.write(f"**Batch {batch_idx + 1} Results:**")
+                            for page_num, result in batch_results.items():
+                                confidence = result.get('confidence', 0)
+                                method = result.get('method', 'unknown')
+                                text_length = len(result.get('text', ''))
+                                st.write(
+                                    f"Page {page_num + 1}: {text_length} chars, {confidence:.1f}% confidence ({method})")
 
-                    # Display results
-                    st.subheader("📝 Extracted Text")
+                # Complete processing
+                progress_bar.progress(1.0)
+                status_text.text("Processing complete!")
 
-                    # Text statistics
-                    word_count = len(extracted_text.split())
-                    char_count = len(extracted_text)
-                    line_count = len(extracted_text.split('\n'))
+                # Generate final results
+                processing_time = time.time() - start_time
+                merged_text = merge_extraction_results(all_results)
 
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Words", f"{word_count:,}")
-                    with col2:
-                        st.metric("Characters", f"{char_count:,}")
-                    with col3:
-                        st.metric("Lines", f"{line_count:,}")
-                    with col4:
-                        st.metric("Processing Speed",
-                                  f"{file_size_mb/processing_time:.1f} MB/min")
+                # Create extraction metadata
+                extraction_metadata = {
+                    'extraction_method': extraction_methods[extraction_method],
+                    'languages_selected': ', '.join(selected_languages),
+                    'total_pages_processed': pages_to_process,
+                    'processing_time_seconds': f"{processing_time:.2f}",
+                    'total_characters_extracted': len(merged_text),
+                    'gemini_extraction_type': gemini_extraction_types.get(gemini_extraction_type, 'N/A') if extraction_method in ["hybrid", "gemini"] else 'N/A',
+                    'preprocessing_enabled': enable_preprocessing,
+                    'extraction_timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
 
-                    # Display text with proper formatting
-                    with st.expander("👁️ Preview Extracted Text", expanded=True):
-                        st.text_area(
-                            "Extracted content:",
-                            value=extracted_text[:2000] + "..." if len(
-                                extracted_text) > 2000 else extracted_text,
-                            height=400,
-                            help="Showing first 2000 characters. Download full text using buttons below."
-                        )
+                # Display results summary
+                st.header("📊 Extraction Results")
 
-                    # Download options
-                    st.subheader("💾 Download Options")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Pages Processed", pages_to_process)
+                with col2:
+                    st.metric("Processing Time", f"{processing_time:.1f}s")
+                with col3:
+                    st.metric("Characters Extracted", f"{len(merged_text):,}")
+                with col4:
+                    avg_confidence = sum(r.get('confidence', 0) for r in all_results.values(
+                    )) / len(all_results) if all_results else 0
+                    st.metric("Avg Confidence", f"{avg_confidence:.1f}%")
 
-                    col1, col2, col3 = st.columns(3)
+                # Results breakdown by method
+                method_counts = {}
+                for result in all_results.values():
+                    method = result.get('method', 'unknown')
+                    method_counts[method] = method_counts.get(method, 0) + 1
 
-                    with col1:
-                        # Plain text download
+                if len(method_counts) > 1:
+                    st.subheader("📈 Processing Method Breakdown")
+                    for method, count in method_counts.items():
+                        st.write(
+                            f"**{method.replace('_', ' ').title()}**: {count} pages")
+
+                # Text preview
+                st.subheader("👁️ Text Preview")
+                preview_text = merged_text[:2000] + \
+                    ("..." if len(merged_text) > 2000 else "")
+                st.text_area("Extracted Text Preview",
+                             preview_text, height=300)
+
+                # Download options
+                st.header("💾 Download Options")
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    # Plain text download
+                    st.download_button(
+                        label="📄 Download as TXT",
+                        data=merged_text.encode('utf-8'),
+                        file_name=f"extracted_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+
+                with col2:
+                    # DOCX download
+                    docx_buffer = create_enhanced_docx_with_metadata(
+                        merged_text, extraction_metadata)
+                    if docx_buffer:
                         st.download_button(
-                            label="📄 Download as TXT",
-                            data=extracted_text,
-                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_extracted.txt",
-                            mime="text/plain"
+                            label="📝 Download as DOCX",
+                            data=docx_buffer.getvalue(),
+                            file_name=f"extracted_text_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                         )
 
-                    with col2:
-                        # Word document download
-                        try:
-                            doc = create_indic_word_document(
-                                extracted_text, 'UTF-8', selected_font)
-                            docx_buffer = io.BytesIO()
-                            doc.save(docx_buffer)
-                            docx_buffer.seek(0)
+                # JSON download for advanced users
+                if enable_debug:
+                    json_data = {
+                        'metadata': extraction_metadata,
+                        'results': {str(k): v for k, v in all_results.items()},
+                        'merged_text': merged_text
+                    }
 
-                            st.download_button(
-                                label="📝 Download as DOCX",
-                                data=docx_buffer.getvalue(),
-                                file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_extracted.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                        except Exception as e:
-                            st.error(f"Error creating Word document: {str(e)}")
-
-                    with col3:
-                        # JSON format with metadata
-                        extraction_metadata = {
-                            "filename": uploaded_file.name,
-                            "extraction_method": extraction_method,
-                            "languages": selected_languages,
-                            "extraction_type": gemini_extraction_type,
-                            "processing_time": round(processing_time, 2),
-                            "file_size_mb": round(file_size_mb, 2),
-                            "word_count": word_count,
-                            "character_count": char_count,
-                            "extraction_date": datetime.now().isoformat(),
-                            "extracted_text": extracted_text
-                        }
-
-                        json_data = json.dumps(
-                            extraction_metadata, ensure_ascii=False, indent=2)
-
-                        st.download_button(
-                            label="📊 Download as JSON",
-                            data=json_data,
-                            file_name=f"{uploaded_file.name.rsplit('.', 1)[0]}_extracted.json",
-                            mime="application/json"
-                        )
-
-                    # Quality assessment
-                    st.subheader("📊 Extraction Quality Assessment")
-
-                    # Basic quality metrics
-                    words_per_page = word_count / \
-                        max(1, line_count // 20)  # Rough page estimate
-
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        if word_count > 1000:
-                            st.success("✅ High content volume")
-                        elif word_count > 100:
-                            st.info("ℹ️ Moderate content volume")
-                        else:
-                            st.warning("⚠️ Low content volume")
-
-                    with col2:
-                        # Check for Indic characters
-                        has_indic = any(ord(char) > 2304 and ord(
-                            char) < 3071 for char in extracted_text)
-                        if has_indic and any(lang != 'english' for lang in selected_languages):
-                            st.success("✅ Indic text detected")
-                        elif not has_indic and any(lang != 'english' for lang in selected_languages):
-                            st.warning("⚠️ No Indic text found")
-                        else:
-                            st.info("ℹ️ English text processed")
-
-                    with col3:
-                        if processing_time < 60:
-                            st.success(
-                                f"✅ Fast processing ({processing_time:.1f}s)")
-                        elif processing_time < 300:
-                            st.info(
-                                f"ℹ️ Normal processing ({processing_time:.1f}s)")
-                        else:
-                            st.warning(
-                                f"⚠️ Slow processing ({processing_time:.1f}s)")
-
-                else:
-                    st.error("❌ Failed to extract text from the PDF.")
-                    st.info("💡 Try the following:")
-                    st.markdown("""
-                    - Switch to a different extraction method
-                    - Ensure the PDF contains readable text or images
-                    - Check if the document is password protected
-                    - Try with a smaller file first
-                    """)
+                    st.download_button(
+                        label="🔧 Download Debug Data (JSON)",
+                        data=json.dumps(json_data, indent=2,
+                                        ensure_ascii=False).encode('utf-8'),
+                        file_name=f"extraction_debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
 
             except Exception as e:
-                st.error(f"❌ An error occurred during extraction: {str(e)}")
-                st.info(
-                    "💡 Please try again or contact support if the issue persists.")
+                st.error(f"❌ Processing failed: {str(e)}")
+                if enable_debug:
+                    st.exception(e)
 
-    else:
-        # Show example and tips when no file is uploaded
-        st.info("👆 Upload a PDF file to start extracting text")
-
-        # Usage tips
-        with st.expander("💡 Usage Tips & Best Practices"):
-            st.markdown("""
-            ### 🎯 Choose the Right Method:
-            - **Regular**: For searchable PDFs with selectable text
-            - **Tesseract OCR**: For scanned documents with clear, printed text
-            - **Gemini AI**: For complex layouts, handwritten text, or mixed content
-            - **Hybrid**: Combines OCR and AI for maximum accuracy (recommended)
-            
-            ### 🌐 Language Selection:
-            - Select all languages present in your document
-            - For mixed-language documents, include all relevant languages
-            - Hindi + English combination works well for most Indian documents
-            
-            ### ⚡ Performance Tips:
-            - Smaller batch sizes use less memory but may be slower
-            - Enable preprocessing for scanned documents
-            - Use Gemini API for best results with complex documents
-            
-            ### 📋 Supported File Types:
-            - PDF files up to 200MB (configurable)
-            - Both text-based and image-based PDFs
-            - Scanned documents and photographs
-            """)
-
-        # Sample results showcase
-        with st.expander("🏆 Example Results"):
-            st.markdown("""
-            ### Sample Extraction Results:
-            
-            **📄 Academic Paper (English + Hindi)**
-            - Method: Hybrid
-            - Accuracy: 96.5%
-            - Processing: 45 seconds for 15 pages
-            
-            **📜 Historical Document (Sanskrit + Hindi)**  
-            - Method: Gemini AI
-            - Accuracy: 94.2%
-            - Processing: 1.2 minutes for 8 pages
-            
-            **📋 Government Form (Hindi + English)**
-            - Method: Tesseract OCR
-            - Accuracy: 91.8%
-            - Processing: 25 seconds for 5 pages
-            """)
+            finally:
+                # Cleanup
+                if 'pdf_document' in locals():
+                    pdf_document.close()
+                cleanup_memory()
 
     # Footer
-    st.divider()
+    st.markdown("---")
     st.markdown("""
-    <div style='text-align: center; color: #666; padding: 20px;'>
-    🚀 Enhanced PDF Text Extractor | Built with Streamlit, Google Gemini 2.0, and Tesseract OCR<br>
-    Supports 12+ Indian languages with advanced AI processing
+    <div style='text-align: center; color: #666;'>
+        <p>🚀 Enhanced PDF Text Extractor | Supports 12+ Languages | AI-Powered Accuracy</p>
+        <p>💡 For best results with Indic languages, use Hybrid or Gemini AI methods</p>
     </div>
     """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
+    # Set up logging
+    logging.basicConfig(level=logging.INFO)
+
+    # Configure Tesseract path if needed (uncomment and modify as per your system)
+    # pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'  # Linux/Mac
+    # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'  # Windows
+
     main()
