@@ -4,7 +4,7 @@ A powerful, AI-enhanced PDF text extraction tool built with Streamlit that suppo
 
 ![Python](https://img.shields.io/badge/python-v3.8+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/streamlit-v1.28+-red.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
+![License](https://img.shields.io/github/license/saltstack/salt)
 
 ## 🚀 Super Quick Start
 
