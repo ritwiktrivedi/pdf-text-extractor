@@ -294,6 +294,7 @@ This project is licensed under the Apche 2.0 License - see the [LICENSE](LICENSE
 - **Tesseract OCR** for text recognition
 - **PyMuPDF** for PDF processing
 - **OpenCV** for image preprocessing
+- **Claude.ai** for coding assistance
 
 ## 📞 Support
 
