@@ -150,7 +150,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 ## 📁 Project Structure
 
 ```
-enhanced-pdf-extractor/
+pdf-text-extractor/
 ├── app.py                 # Main Streamlit application
 ├── requirements.txt       # Python dependencies
 ├── README.md              # This file
